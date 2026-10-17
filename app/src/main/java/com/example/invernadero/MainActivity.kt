@@ -1,11 +1,8 @@
 package com.example.invernadero
 
-import android.Manifest
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -14,11 +11,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 
 class MainActivity : ComponentActivity() {
-    private val pedirPermisos = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {}
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        if (Build.VERSION.SDK_INT >= 33) pedirPermisos.launch(arrayOf(Manifest.permission.POST_NOTIFICATIONS))
 
         val db = BaseDatos(this)
 
@@ -27,26 +22,46 @@ class MainActivity : ComponentActivity() {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     var pantalla by remember { mutableStateOf("login") }
                     var usuarioActual by remember { mutableStateOf("") }
+                    var rolActual by remember { mutableStateOf("") }
                     var keyMQTT by remember { mutableIntStateOf(0) }
-                    val mqtt = remember(keyMQTT) { ConexionMQTT() }
+                    val mqtt = remember(keyMQTT) { ConexionMQTT(this@MainActivity) }
 
                     when (pantalla) {
                         "login" -> PantallaLogin(db,
-                            onIngreso = { usr -> usuarioActual = usr; pantalla = "menu" }
+                            onIngreso = { usr, rol ->
+                                usuarioActual = usr
+                                rolActual = rol
+                                pantalla = "menu"
+                            }
                         )
                         "menu" -> {
+                            val estadoMQTT by mqtt.estado.collectAsState()
+
+                            // Transición automática SOLO cuando la conexión es exitosa
+                            LaunchedEffect(estadoMQTT) {
+                                if (estadoMQTT.contains("Conectado por WiFi")) {
+                                    pantalla = "panel"
+                                }
+                            }
+
                             Column(modifier = Modifier.padding(24.dp)) {
                                 Text("Conexión al Invernadero", style = MaterialTheme.typography.headlineMedium)
                                 Spacer(modifier = Modifier.height(24.dp))
-                                Button(onClick = {
-                                    mqtt.conectar()
-                                    pantalla = "panel"
-                                }, modifier = Modifier.fillMaxWidth()) {
-                                    Text("Conectar por WiFi (HiveMQ)")
+
+                                Button(
+                                    onClick = { mqtt.conectar() },
+                                    enabled = !estadoMQTT.contains("Conectando"),
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text(if (estadoMQTT.contains("Conectando")) "Conectando..." else "Conectar por WiFi (HiveMQ)")
+                                }
+
+                                if (estadoMQTT.contains("Error") || estadoMQTT.contains("Desconectado")) {
+                                    Text(text = estadoMQTT, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(top = 8.dp))
                                 }
                             }
                         }
-                        "panel" -> PantallaPanel(mqtt, usuarioActual, onSalir = {
+                        "panel" -> PantallaPanel(mqtt, usuarioActual, rolActual, onSalir = {
                             mqtt.desconectar()
                             pantalla = "menu"
                             keyMQTT++
@@ -59,7 +74,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun PantallaLogin(db: BaseDatos, onIngreso: (String) -> Unit) {
+fun PantallaLogin(db: BaseDatos, onIngreso: (String, String) -> Unit) {
     var usr by remember { mutableStateOf("") }
     var pass by remember { mutableStateOf("") }
     var mensaje by remember { mutableStateOf("") }
@@ -74,7 +89,7 @@ fun PantallaLogin(db: BaseDatos, onIngreso: (String) -> Unit) {
         Button(onClick = {
             if (usr.isNotBlank() && pass.isNotBlank()) {
                 val rol = db.autenticar(usr, pass.toCharArray())
-                if (rol != null) onIngreso(usr) else mensaje = "Error: Usuario/Clave incorrectos"
+                if (rol != null) onIngreso(usr, rol) else mensaje = "Error: Usuario/Clave incorrectos"
             } else {
                 mensaje = "Por favor ingrese usuario y contraseña"
             }
@@ -86,7 +101,7 @@ fun PantallaLogin(db: BaseDatos, onIngreso: (String) -> Unit) {
             if (usr.isNotBlank() && pass.isNotBlank()) {
                 if (pass.length >= 8) {
                     val rol = db.registrar(usr, pass.toCharArray())
-                    if (rol != null) onIngreso(usr) else mensaje = "El usuario ya existe"
+                    if (rol != null) onIngreso(usr, rol) else mensaje = "El usuario ya existe"
                 } else mensaje = "Mínimo 8 caracteres"
             } else {
                 mensaje = "Los campos no pueden estar vacíos"
@@ -98,14 +113,14 @@ fun PantallaLogin(db: BaseDatos, onIngreso: (String) -> Unit) {
 }
 
 @Composable
-fun PantallaPanel(mqtt: ConexionMQTT, usuario: String, onSalir: () -> Unit) {
+fun PantallaPanel(mqtt: ConexionMQTT, usuario: String, rol: String, onSalir: () -> Unit) {
     val estado by mqtt.estado.collectAsState()
     val temp by mqtt.temperatura.collectAsState()
     val humedad by mqtt.humedadSuelo.collectAsState()
 
     Column(modifier = Modifier.padding(24.dp)) {
         Text("Invernadero IoT", style = MaterialTheme.typography.headlineMedium)
-        Text(text = "Usuario: $usuario | Estado: $estado")
+        Text(text = "Usuario: $usuario ($rol) | Estado: $estado")
         Spacer(modifier = Modifier.height(32.dp))
 
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -119,20 +134,30 @@ fun PantallaPanel(mqtt: ConexionMQTT, usuario: String, onSalir: () -> Unit) {
 
         Spacer(modifier = Modifier.height(32.dp))
 
-        Text("Control Manual", style = MaterialTheme.typography.titleMedium)
-        Spacer(modifier = Modifier.height(8.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Button(
-                onClick = { mqtt.controlarBomba("ON") },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-            ) {
-                Text("Encender")
+        if (rol == "operador") {
+            Text("Control Manual", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Button(
+                    onClick = { mqtt.controlarBomba("ON") },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Text("Encender")
+                }
+                Button(
+                    onClick = { mqtt.controlarBomba("OFF") },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Apagar")
+                }
             }
-            Button(
-                onClick = { mqtt.controlarBomba("OFF") },
-                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-            ) {
-                Text("Apagar")
+        } else {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    text = "Modo Observador: Control de bomba deshabilitado. Solo puede visualizar los sensores.",
+                    modifier = Modifier.padding(16.dp),
+                    color = MaterialTheme.colorScheme.secondary
+                )
             }
         }
 

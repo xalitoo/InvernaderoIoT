@@ -7,7 +7,8 @@ import android.database.sqlite.SQLiteOpenHelper
 
 data class Lectura(val momento: Long, val clave: String, val valor: Double)
 
-class BaseDatos(ctx: Context) : SQLiteOpenHelper(ctx, "alarma.db", null, 1) {
+// CAMBIO AQUÍ: Se cambió "alarma.db" por "invernadero.db"
+class BaseDatos(ctx: Context) : SQLiteOpenHelper(ctx, "invernadero.db", null, 1) {
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL("CREATE TABLE usuarios (usuario TEXT PRIMARY KEY, sal BLOB NOT NULL, hash BLOB NOT NULL, rol TEXT NOT NULL)")
         db.execSQL("CREATE TABLE lecturas (id INTEGER PRIMARY KEY AUTOINCREMENT, momento INTEGER NOT NULL, clave TEXT NOT NULL, valor REAL NOT NULL)")
@@ -45,4 +46,3 @@ class BaseDatos(ctx: Context) : SQLiteOpenHelper(ctx, "alarma.db", null, 1) {
         writableDatabase.insert("lecturas", null, fila)
     }
 }
-

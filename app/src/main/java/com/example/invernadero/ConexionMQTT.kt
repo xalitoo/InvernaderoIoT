@@ -8,7 +8,6 @@ import kotlinx.coroutines.flow.*
 import org.eclipse.paho.client.mqttv3.*
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence
 import org.json.JSONObject
-import java.security.MessageDigest
 import java.util.UUID
 import javax.net.ssl.SSLSocketFactory
 
@@ -40,20 +39,15 @@ class ConexionMQTT(private val context: Context) {
                 capabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
     }
 
-    // 2. Firma SHA-256 para integridad de mensajes (ISO 27000 - Paso 6)
-    private fun calcularSha256(datos: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256").digest(datos.toByteArray(Charsets.UTF_8))
-        return bytes.joinToString("") { "%02x".format(it) }
-    }
-
+    // 2. Firma HMAC-SHA256 con clave compartida para integridad y autenticidad (ISO 27000)
     private fun construirPayloadSeguro(accion: String): String {
         val timestamp = System.currentTimeMillis()
-        val hash = calcularSha256("accion|$accion|$timestamp")
+        val hmac = Cripto.calcularHmacSha256("accion|$accion|$timestamp")
         return JSONObject().apply {
             put("origen", "AndroidApp")
             put("accion", accion)
             put("timestamp", timestamp)
-            put("hash", hash)
+            put("hmac", hmac)
         }.toString()
     }
 
@@ -126,21 +120,20 @@ class ConexionMQTT(private val context: Context) {
         }
     }
 
-    // 4. Validación de integridad SHA-256 y persistencia local (Pasos 3, 5 y 6)
+    // 4. Validación de autenticidad e integridad HMAC-SHA256 y persistencia local
     private fun procesarMensajeEntrante(topic: String, texto: String) {
         val valorNumerico: Double? = if (texto.startsWith("{")) {
             try {
                 val json = JSONObject(texto)
                 val valorStr = json.optString("valor", "")
-                val hashRecibido = json.optString("hash", "")
+                val hmacRecibido = json.optString("hmac", json.optString("hash", ""))
                 val ts = json.optLong("timestamp", 0L)
 
-                if (hashRecibido.isNotEmpty() && ts > 0L) {
-                    val hashEsperado = calcularSha256("valor|$valorStr|$ts")
-                    if (!hashRecibido.equals(hashEsperado, ignoreCase = true)) {
-                        alertaContingencia.value = "Alerta ISO 27000: trama alterada descartada en $topic"
-                        return
-                    }
+                if (hmacRecibido.isEmpty() || ts <= 0L ||
+                    !Cripto.verificarHmacSha256("valor|$valorStr|$ts", hmacRecibido)
+                ) {
+                    alertaContingencia.value = "Alerta ISO 27000: firma HMAC-SHA256 inválida en $topic"
+                    return
                 }
                 valorStr.toDoubleOrNull()
             } catch (_: Exception) {
